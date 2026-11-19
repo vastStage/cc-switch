@@ -3718,6 +3718,7 @@ impl SkillService {
                     || normalized == "."
                     || normalized == ".."
                     || normalized.starts_with('.')
+                    || Self::windows_normalizes_install_name(&normalized)
                 {
                     None
                 } else {
@@ -3726,6 +3727,43 @@ impl SkillService {
             }
             _ => None,
         }
+    }
+
+    /// Windows 会静默去掉路径段末尾的点和空格：`foo.`、`foo .` 与 `foo` 是同一个
+    /// 目录；`CON` / `NUL` / `COM1` 这类设备名根本不能建目录（带扩展名也一样）。
+    /// 这些名字在 Linux/macOS 上合法，但同步或恢复到 Windows 后会命中已有目录——
+    /// ZIP 安装对已存在的目标会 `remove_dir_all`（见安装流程），等于静默删掉旧
+    /// Skill。分隔符在上面也是按同一理由拒绝的。
+    fn windows_normalizes_install_name(name: &str) -> bool {
+        if name.trim_end_matches(['.', ' ']) != name {
+            return true;
+        }
+        let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+        matches!(
+            stem.as_str(),
+            "con"
+                | "prn"
+                | "aux"
+                | "nul"
+                | "com1"
+                | "com2"
+                | "com3"
+                | "com4"
+                | "com5"
+                | "com6"
+                | "com7"
+                | "com8"
+                | "com9"
+                | "lpt1"
+                | "lpt2"
+                | "lpt3"
+                | "lpt4"
+                | "lpt5"
+                | "lpt6"
+                | "lpt7"
+                | "lpt8"
+                | "lpt9"
+        )
     }
 
     /// 校验来自 DB 行 / 备份 meta.json 等外部来源的 directory 字段。
@@ -8641,6 +8679,28 @@ mod tests {
             assert!(
                 SkillService::require_valid_directory(bad).is_err(),
                 "must reject: {bad:?}"
+            );
+        }
+    }
+
+    /// Windows 会静默去掉路径段末尾的点和空格，`foo.` 与 `foo` 是同一个目录；安装
+    /// 流程对已存在的目标会 `remove_dir_all`，所以这类名字必须在入口拒绝，否则安装
+    /// `foo.` 会删掉已有的 `foo`。设备名（`CON`、`NUL.txt` 等）在 Windows 上根本
+    /// 建不出目录，也一并拒绝，给出明确的「非法目录名」而不是模糊的 IO 错误。
+    #[test]
+    fn install_names_reject_windows_normalized_and_reserved_forms() {
+        for bad in [
+            "foo.", "foo..", "foo .", "foo.bar.", "CON", "con", "NUL.txt", "COM1", "LPT9",
+        ] {
+            assert!(
+                SkillService::sanitize_install_name(bad).is_none(),
+                "must reject: {bad:?}"
+            );
+        }
+        for good in ["foo", "foo.bar", "my-skill_2", "console", "com10", "技能"] {
+            assert!(
+                SkillService::sanitize_install_name(good).is_some(),
+                "must accept: {good:?}"
             );
         }
     }
