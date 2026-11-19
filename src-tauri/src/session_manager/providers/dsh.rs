@@ -106,8 +106,11 @@ fn scan(root: &Path) -> Vec<SessionMeta> {
         .into_iter()
         .filter_map(|path| {
             let data = read_session(&path).ok()?;
-            let mut lines = data.split(|byte| *byte == b'\n');
-            let header: Value = serde_json::from_slice(lines.next()?).ok()?;
+            // 空行不是记录：手工编辑或追加时留下空行不该让整个会话消失。
+            let header: Value = data
+                .split(|byte| *byte == b'\n')
+                .find(|line| !line.iter().all(u8::is_ascii_whitespace))
+                .and_then(|line| serde_json::from_slice(line).ok())?;
             if !matches!(header["type"].as_str(), Some("session" | "header")) {
                 return None;
             }
@@ -149,6 +152,11 @@ fn parse_messages(data: &[u8]) -> Result<Vec<SessionMessage>, String> {
         // An incomplete JSONL tail is still being written.
         if !line.ends_with(b"\n") {
             break;
+        }
+        // 空行/纯空白行不是记录。usage 导入侧（`session_usage_dsh::collect_requests`）
+        // 已经跳过它们；浏览侧如果把它当坏 JSON，会让整段会话从列表里消失。
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
         }
         let record: Value =
             serde_json::from_slice(line).map_err(|_| "Invalid DeepSeek Harness session JSONL")?;
@@ -295,6 +303,27 @@ mod tests {
             SessionBlock::ToolResult { ref call_id, status: ToolStatus::Success, ref preview, .. }
                 if call_id == "call" && preview == "contents"
         ));
+    }
+
+    /// 空行不是记录。追加写入或手工编辑留下空行时，浏览侧曾把整段会话当成坏 JSON
+    /// 丢掉（列表、正文、搜索索引都看不到）；usage 导入侧本来就跳过空行。
+    #[test]
+    fn blank_lines_do_not_hide_the_whole_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project/test");
+        fs::create_dir_all(&root).unwrap();
+        let text = String::from_utf8(fixture()).unwrap();
+        // header 之前 + 第一条记录之前各插一个空行
+        let text = format!("\n{}", text.replacen('\n', "\n\n", 1));
+        let path = root.join("session.v4.jsonl");
+        fs::write(&path, text.as_bytes()).unwrap();
+
+        let messages = load_messages(&path).expect("blank lines must not fail the session");
+        assert_eq!(messages.len(), 3);
+
+        let sessions = scan(temp.path());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title.as_deref(), Some("Fix this"));
     }
 
     #[test]
