@@ -1495,6 +1495,64 @@ fn test_codex_link_accepts_a_whole_config_toml() {
     );
 }
 
+/// 前端预览按 `configFormat.trim().toLowerCase()` 解析，后端必须同义：链接是第三方
+/// 手工拼的，`JSON` / `Toml` 很常见。大小写不一致时预览能正常显示，点导入却报
+/// `Unsupported config format`。
+#[test]
+fn test_config_format_is_case_and_whitespace_insensitive() {
+    let toml_text = concat!(
+        "model_provider = \"custom\"\n",
+        "[model_providers.custom]\nname = \"Relay\"\n",
+        "base_url = \"https://relay.example/v1\"\nwire_api = \"responses\"\n",
+    );
+    for format in ["toml", "TOML", "Toml", " toml "] {
+        let request = DeepLinkImportRequest {
+            version: "v1".to_string(),
+            resource: "provider".to_string(),
+            app: Some("codex".to_string()),
+            name: Some("Relay".to_string()),
+            config: Some(BASE64_STANDARD.encode(toml_text)),
+            config_format: Some(format.to_string()),
+            ..Default::default()
+        };
+        let merged = parse_and_merge_config(&request)
+            .unwrap_or_else(|e| panic!("configFormat {format:?} must be accepted: {e}"));
+        assert_eq!(
+            merged.endpoint.as_deref(),
+            Some("https://relay.example/v1"),
+            "configFormat {format:?}"
+        );
+    }
+
+    // Claude 的 env 抽取同样按格式判断；大写 JSON 不能让它静默返回空 env。
+    let claude_json =
+        r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-x","ANTHROPIC_BASE_URL":"https://relay.example"}}"#;
+    let request = DeepLinkImportRequest {
+        version: "v1".to_string(),
+        resource: "provider".to_string(),
+        app: Some("claude".to_string()),
+        name: Some("Relay".to_string()),
+        config: Some(BASE64_STANDARD.encode(claude_json)),
+        config_format: Some("JSON".to_string()),
+        ..Default::default()
+    };
+    let merged = parse_and_merge_config(&request).expect("uppercase JSON must be accepted");
+    assert_eq!(merged.endpoint.as_deref(), Some("https://relay.example"));
+    assert_eq!(merged.api_key.as_deref(), Some("sk-x"));
+
+    // 真正不支持的格式仍然拒绝，别把拼错的名字也当成 JSON。
+    let request = DeepLinkImportRequest {
+        version: "v1".to_string(),
+        resource: "provider".to_string(),
+        app: Some("codex".to_string()),
+        name: Some("Relay".to_string()),
+        config: Some(BASE64_STANDARD.encode("{}")),
+        config_format: Some("xml".to_string()),
+        ..Default::default()
+    };
+    assert!(parse_and_merge_config(&request).is_err());
+}
+
 // ============ Grok Build：链接附带的 config.toml ============
 
 fn import_grok_with_config(config_toml: &str) -> Result<serde_json::Value, crate::error::AppError> {

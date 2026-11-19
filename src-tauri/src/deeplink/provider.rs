@@ -796,7 +796,7 @@ fn extract_claude_config_env(
     let config_b64 = request.config.as_ref()?;
 
     // Honor the declared format; default to JSON like parse_and_merge_config does.
-    let format = request.config_format.as_deref().unwrap_or("json");
+    let format = normalized_config_format(request);
     if format != "json" {
         // Claude config is always JSON in practice. TOML/other formats aren't
         // expected on this app path, so don't try to handle them — safer to
@@ -1249,6 +1249,18 @@ fn build_omp_settings(
 // Config Merge Logic
 // =============================================================================
 
+/// `configFormat` 的大小写和空白不敏感。链接由第三方手工拼接，`JSON` / `Toml` 很常见；
+/// 前端预览（`deepLinkConfigPreview.ts`）已经这样处理，后端必须同义，否则预览能正常
+/// 解析、点导入却报 `Unsupported config format`。
+fn normalized_config_format(request: &DeepLinkImportRequest) -> String {
+    request
+        .config_format
+        .as_deref()
+        .unwrap_or("json")
+        .trim()
+        .to_ascii_lowercase()
+}
+
 /// 解码链接的 `config` 参数（Base64），按 `configFormat` 解析成 JSON 值。没带时返回 `None`。
 fn decode_link_config(
     request: &DeepLinkImportRequest,
@@ -1265,8 +1277,8 @@ fn decode_link_config(
         return Ok(None);
     };
 
-    let format = request.config_format.as_deref().unwrap_or("json");
-    let config_value = match format {
+    let format = normalized_config_format(request);
+    let config_value = match format.as_str() {
         "json" => serde_json::from_str(&config_content)
             .map_err(|e| AppError::InvalidInput(format!("Invalid JSON config: {e}")))?,
         "toml" => {
